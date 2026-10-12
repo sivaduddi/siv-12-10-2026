@@ -1,0 +1,11 @@
+# This file contains which files will be ignored from tracking.
+
+# To untrack logfiles 
+*.log
+
+# To untrack temp folder
+/tmp/
+
+# To untrack java class file 
+
+*.class
