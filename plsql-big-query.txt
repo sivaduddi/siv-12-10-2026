@@ -1,0 +1,74 @@
+SET SERVEROUTPUT ON;
+
+DECLARE
+  -- Define an exception for business rule validation
+  ex_salary_too_high EXCEPTION;
+  
+  -- Define a cursor with a join query to find eligible employees
+  CURSOR c_dept_salaries IS
+    SELECT 
+      e.employee_id,
+      e.first_name || ' ' || e.last_name AS full_name,
+      e.salary,
+      d.department_name
+    FROM employees e
+    JOIN departments d ON e.department_id = d.department_id
+    WHERE d.department_name = 'IT';
+
+  -- Type definition for bulk collect
+  TYPE t_emp_list IS TABLE OF c_dept_salaries%ROWTYPE;
+  v_emp_collection t_emp_list;
+  
+  -- Variables for processing
+  v_hike_percentage NUMBER := 0.10; -- 10% hike
+  v_new_salary      NUMBER;
+  v_updated_count   NUMBER := 0;
+
+BEGIN
+  -- Open cursor and bulk collect records into the collection
+  OPEN c_dept_salaries;
+  FETCH c_dept_salaries BULK COLLECT INTO v_emp_collection;
+  CLOSE c_dept_salaries;
+
+  -- Loop through the collected records
+  FOR i IN 1 .. v_emp_collection.COUNT LOOP
+    BEGIN
+      v_new_salary := v_emp_collection(i).salary * (1 + v_hike_percentage);
+
+      -- Apply custom business rule validation
+      IF v_new_salary > 150000 THEN
+        RAISE ex_salary_too_high;
+      END IF;
+
+      -- Update the employee salary in the database
+      UPDATE employees
+      SET salary = v_new_salary
+      WHERE employee_id = v_emp_collection(i).employee_id;
+
+      v_updated_count := v_updated_count + 1;
+
+      DBMS_OUTPUT.PUT_LINE(
+        'Updated ' || v_emp_collection(i).full_name || 
+        ' | Old: ' || v_emp_collection(i).salary || 
+        ' | New: ' || v_new_salary
+      );
+
+    EXCEPTION
+      WHEN ex_salary_too_high THEN
+        DBMS_OUTPUT.PUT_LINE(
+          'Skipped ' || v_emp_collection(i).full_name || 
+          ' (New salary ' || v_new_salary || ' exceeds cap)'
+        );
+    END;
+  END LOOP;
+
+  -- Commit the valid changes
+  COMMIT;
+  DBMS_OUTPUT.PUT_LINE('Total employees updated: ' || v_updated_count);
+
+EXCEPTION
+  WHEN OTHERS THEN
+    ROLLBACK;
+    DBMS_OUTPUT.PUT_LINE('An unexpected error occurred: ' || SQLERRM);
+END;
+/

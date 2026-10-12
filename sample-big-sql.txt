@@ -1,0 +1,94 @@
+-- CTE 1: Aggregate global sales metrics by month and region
+WITH monthly_regional_sales AS (
+    SELECT 
+        DATE_TRUNC('month', o.order_date) AS sales_month,
+        r.region_name,
+        COUNT(DISTINCT o.customer_id) AS active_customers_count,
+        COUNT(o.order_id) AS total_orders,
+        SUM(o.order_amount) AS gross_revenue,
+        -- Calculate cumulative running total revenue per region over time
+        SUM(SUM(o.order_amount)) OVER (
+            PARTITION BY r.region_name 
+            ORDER BY DATE_TRUNC('month', o.order_date)
+        ) AS cumulative_revenue_to_date
+    FROM orders o
+    INNER JOIN employees e ON o.employee_id = e.id
+    INNER JOIN departments d ON e.department_id = d.id
+    INNER JOIN regions r ON d.region_id = r.id
+    WHERE o.status = 'COMPLETED'
+    GROUP BY DATE_TRUNC('month', o.order_date), r.region_name
+),
+
+-- CTE 2: Calculate Month-over-Month (MoM) revenue growth metrics
+sales_growth_metrics AS (
+    SELECT 
+        sales_month,
+        region_name,
+        gross_revenue,
+        cumulative_revenue_to_date,
+        -- Fetch the previous month's revenue to compute growth
+        LAG(gross_revenue, 1) OVER (
+            PARTITION BY region_name 
+            ORDER BY sales_month
+        ) AS previous_month_revenue
+    FROM monthly_regional_sales
+),
+
+-- CTE 3: Rank sales representatives within their regions based on Year-to-Date performance
+employee_performance_ranking AS (
+    SELECT 
+        e.id AS employee_id,
+        e.first_name || ' ' || e.last_name AS employee_name,
+        d.name AS department_name,
+        r.region_name,
+        SUM(o.order_amount) AS total_sales_generated,
+        -- Assign a unique performance tier rank using a window function
+        DENSE_RANK() OVER (
+            PARTITION BY r.region_name 
+            ORDER BY SUM(o.order_amount) DESC
+        ) AS regional_sales_rank
+    FROM employees e
+    INNER JOIN departments d ON e.department_id = d.id
+    INNER JOIN regions r ON d.region_id = r.id
+    LEFT JOIN orders o ON e.id = o.employee_id AND o.order_date >= '2026-01-01'
+    WHERE o.status = 'COMPLETED'
+    GROUP BY e.id, e.first_name, e.last_name, d.name, r.region_name
+)
+
+-- Main Query: Combine metrics to build the final consolidated intelligence dataset
+SELECT 
+    sg.sales_month,
+    sg.region_name,
+    sg.gross_revenue AS current_month_revenue,
+    sg.cumulative_revenue_to_date,
+    
+    -- Conditional categorization of growth metrics
+    CASE 
+        WHEN sg.previous_month_revenue IS NULL THEN 'Baseline Month'
+        WHEN sg.gross_revenue > sg.previous_month_revenue THEN 'Growth'
+        WHEN sg.gross_revenue < sg.previous_month_revenue THEN 'Decline'
+        ELSE 'No Change'
+    END AS revenue_trajectory,
+    
+    -- Calculate precise percentage delta
+    ROUND(
+        ((sg.gross_revenue - sg.previous_month_revenue) / NULLIF(sg.previous_month_revenue, 0)) * 100, 
+        2
+    ) AS revenue_growth_percentage,
+    
+    epr.employee_name AS top_regional_performer,
+    epr.total_sales_generated AS top_performer_ytd_sales
+
+FROM sales_growth_metrics sg
+-- Link the top performer (Rank #1) from each region into the monthly report
+LEFT JOIN employee_performance_ranking epr 
+    ON sg.region_name = epr.region_name 
+    AND epr.regional_sales_rank = 1
+
+WHERE sg.sales_month >= '2025-01-01' -- Filter data scope to recent history
+
+-- Keep rows that have meaningful revenue contributions
+HAVING sg.gross_revenue > 10000 
+
+-- Present data chronologically, then by regional order
+ORDER BY sg.sales_month DESC, sg.gross_revenue DESC;

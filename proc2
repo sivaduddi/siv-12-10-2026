@@ -1,0 +1,153 @@
+CREATE OR ALTER PROCEDURE dbo.usp_ProcessMonthlyOrders
+    @CustomerID INT,
+    @ProcessDate DATE,
+    @DebugMode BIT = 0,
+    @RowsProcessed INT OUTPUT
+AS
+/*******************************************************************************
+Author:       AI Collaborator
+Created:      2026-10-12
+Description:  Processes monthly orders for a specific customer, applies 
+              discounts, and updates the financial ledger.
+              
+Usage:
+    DECLARE @Count INT;
+    EXEC dbo.usp_ProcessMonthlyOrders 
+        @CustomerID = 12345, 
+        @ProcessDate = '2026-10-01', 
+        @DebugMode = 0,
+        @RowsProcessed = @Count OUTPUT;
+    SELECT @Count AS 'ProcessedRows';
+*******************************************************************************/
+BEGIN
+    -- 1. SET SETTINGS FOR PERFORMANCE & SAFETY
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON; -- Automatically rolls back transaction on run-time error
+
+    -- 2. DECLARE LOCAL VARIABLES & TEMP TABLES
+    DECLARE @LogMessage NVARCHAR(500);
+    DECLARE @CurrentStep NVARCHAR(100) = 'Initialization';
+    
+    CREATE TABLE #TempOrderDetails (
+        OrderID INT,
+        ProductID INT,
+        Quantity INT,
+        UnitPrice DECIMAL(18,2),
+        DiscountApplied DECIMAL(5,2)
+    );
+
+    -- 3. START TRY BLOCK FOR ERROR HANDLING
+    BEGIN TRY
+        
+        -- STEP 1: Validate Input Parameters
+        SET @CurrentStep = 'Validating Inputs';
+        IF @CustomerID IS NULL OR @ProcessDate IS NULL
+        BEGIN
+            RAISERROR('CustomerID and ProcessDate cannot be NULL.', 16, 1);
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM dbo.Customers WHERE CustomerID = @CustomerID)
+        BEGIN
+            SET @LogMessage = FORMATMESSAGE('Customer ID %d does not exist.', @CustomerID);
+            RAISERROR(@LogMessage, 16, 1);
+        END
+
+        -- STEP 2: Extract and Stage Data
+        SET @CurrentStep = 'Staging Order Data';
+        
+        INSERT INTO #TempOrderDetails (OrderID, ProductID, Quantity, UnitPrice, DiscountApplied)
+        SELECT 
+            o.OrderID, 
+            od.ProductID, 
+            od.Quantity, 
+            od.UnitPrice,
+            0.00
+        FROM dbo.Orders o
+        INNER JOIN dbo.OrderDetails od ON o.OrderID = od.OrderID
+        WHERE o.CustomerID = @CustomerID
+          AND o.OrderDate >= DATEADD(month, DATEDIFF(month, 0, @ProcessDate), 0) -- Start of month
+          AND o.OrderDate < DATEADD(month, DATEDIFF(month, 0, @ProcessDate) + 1, 0); -- End of month
+
+        -- Debug breakpoint if flag is active
+        IF @DebugMode = 1
+        BEGIN
+            SELECT '#TempOrderDetails Post-Stage' AS DebugCheckpoint, * FROM #TempOrderDetails;
+        END
+
+        -- STEP 3: Apply Business Logic (Complex Transformations)
+        SET @CurrentStep = 'Applying Discounts';
+        
+        -- Apply a 10% discount for high-volume items (Quantity > 50)
+        UPDATE #TempOrderDetails
+        SET DiscountApplied = 0.10
+        WHERE Quantity > 50;
+
+        -- STEP 4: Execute Transactional Modifications
+        SET @CurrentStep = 'Committing Ledger Updates';
+        
+        BEGIN TRANSACTION;
+
+            -- Update the live OrderDetails table with discounts
+            UPDATE od
+            SET od.Discount = t.DiscountApplied,
+                od.ModifiedDate = GETDATE()
+            FROM dbo.OrderDetails od
+            INNER JOIN #TempOrderDetails t 
+                ON od.OrderID = t.OrderID AND od.ProductID = t.ProductID;
+
+            -- Insert a record into the Financial Ledger
+            INSERT INTO dbo.FinancialLedger (CustomerID, TransactionDate, TotalAmount, Description)
+            SELECT 
+                @CustomerID,
+                GETDATE(),
+                SUM(Quantity * UnitPrice * (1 - DiscountApplied)),
+                'Automated monthly bulk processing batch.'
+            FROM #TempOrderDetails;
+
+            -- Set the output parameter value
+            SELECT @RowsProcessed = COUNT(DISTINCT OrderID) FROM #TempOrderDetails;
+
+        COMMIT TRANSACTION;
+
+        -- STEP 5: Final Clean-up
+        SET @CurrentStep = 'Cleanup';
+        DROP TABLE #TempOrderDetails;
+
+    END TRY
+    
+    -- 4. ERROR HANDLING BLOCK
+    BEGIN CATCH
+        -- Rollback transaction if it remains open
+        IF @@TRANCOUNT > 0
+        BEGIN
+            ROLLBACK TRANSACTION;
+        END
+
+        -- Capture error details
+        DECLARE @ErrorNumber INT = ERROR_NUMBER();
+        DECLARE @ErrorSeverity INT = ERROR_SEVERITY();
+        DECLARE @ErrorState INT = ERROR_STATE();
+        DECLARE @ErrorLine INT = ERROR_LINE();
+        DECLARE @ErrorProcedure NVARCHAR(128) = ERROR_PROCEDURE();
+        DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+
+        -- Format comprehensive error message
+        SET @LogMessage = CHAR(13) + CHAR(10) + 
+                          'Error occurred in Procedure: ' + ISNULL(@ErrorProcedure, 'Format') + CHAR(13) + CHAR(10) +
+                          'Failed Step: ' + @CurrentStep + CHAR(13) + CHAR(10) +
+                          'Line Number: ' + CAST(@ErrorLine AS VARCHAR(10)) + CHAR(13) + CHAR(10) +
+                          'Message: ' + @ErrorMessage;
+
+        -- Log error to an internal application log table
+        INSERT INTO dbo.ApplicationErrorLog (ErrorNumber, ErrorSeverity, ErrorState, ErrorProcedure, ErrorLine, ErrorMessage, LogDate)
+        VALUES (@ErrorNumber, @ErrorSeverity, @ErrorState, @ErrorProcedure, @ErrorLine, @LogMessage, GETDATE());
+
+        -- Re-throw the error to the calling application
+        RAISERROR(@LogMessage, @ErrorSeverity, @ErrorState);
+        
+        RETURN -1; -- Return failure code
+    END CATCH
+
+    RETURN 0; -- Return success code
+END;
+GO
