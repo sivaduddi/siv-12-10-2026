@@ -151,3 +151,11 @@ BEGIN
     RETURN 0; -- Return success code
 END;
 GO
+
+
+git merge test added new little code
+  SET @LogMessage = CHAR(13) + CHAR(10) + 
+                          'Error occurred in Procedure: ' + ISNULL(@ErrorProcedure, 'Format') + CHAR(13) + CHAR(10) +
+                          'Failed Step: ' + @CurrentStep + CHAR(13) + CHAR(10) +
+                          'Line Number: ' + CAST(@ErrorLine AS VARCHAR(10)) + CHAR(13) + CHAR(10) +
+                          'Message: ' + @ErrorMessage;
